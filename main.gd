@@ -142,6 +142,11 @@ func _draw_tile() -> void:
 	_refresh()
 
 
+func _on_hand_gui_input(event: InputEvent, idx: int) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		_on_hand_pressed(idx)
+
+
 func _on_hand_pressed(index: int) -> void:
 	if index < 0 or index >= hand.size():
 		return
@@ -156,12 +161,13 @@ func _refresh() -> void:
 		hand_box.remove_child(c)
 		c.queue_free()
 	for i in hand.size():
-		var b := TextureButton.new()
-		b.texture_normal = textures[hand[i]]
+		var b := TextureRect.new()
+		b.texture = textures[hand[i]]
 		b.custom_minimum_size = HAND_TILE_SIZE
-		b.expand_mode = 1 # EXPAND_IGNORE_SIZE (TextureButton has no named constant for this in Godot 4.7)
-		b.stretch_mode = TextureButton.STRETCH_SCALE
-		b.pressed.connect(_on_hand_pressed.bind(i))
+		b.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		b.stretch_mode = TextureRect.STRETCH_SCALE
+		b.mouse_filter = Control.MOUSE_FILTER_STOP
+		b.gui_input.connect(_on_hand_gui_input.bind(i))
 		hand_box.add_child(b)
 
 	for c in river_grid.get_children():
