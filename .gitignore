@@ -1,0 +1,13 @@
+# Godot
+.godot/
+.import/
+*.tmp
+
+# Prototype tile source archive (the PNGs in assets/tiles are what the game uses)
+assets/tiles_src/
+assets/tiles.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
