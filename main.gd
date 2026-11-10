@@ -47,6 +47,8 @@ const ABORT_JA := {
 var game
 var textures: Dictionary = {}
 var riichi_mode := false
+var auto_tsumogiri := true  # after riichi, discard the drawn tile automatically
+var no_calls := false        # auto-pass pon/chi/kan offers (ron still stops)
 var label_index := 0  # 0..3 within the current wind (東1局..東4局, then 南)
 
 var info_label: Label
@@ -106,6 +108,15 @@ func _build_ui() -> void:
 	restart.text = "対局を最初から"
 	restart.pressed.connect(_new_match)
 	top.add_child(restart)
+	var auto_cb := CheckBox.new()
+	auto_cb.text = "リーチ後オートツモ切り"
+	auto_cb.button_pressed = true
+	auto_cb.toggled.connect(func(on: bool): auto_tsumogiri = on)
+	top.add_child(auto_cb)
+	var nc_cb := CheckBox.new()
+	nc_cb.text = "鳴きなし"
+	nc_cb.toggled.connect(func(on: bool): no_calls = on)
+	top.add_child(nc_cb)
 
 	# table area (expands); every region inside has a FIXED height, so no
 	# amount of discards can push the hand / buttons off screen
@@ -244,8 +255,48 @@ func _start_round() -> void:
 
 
 func _on_tick() -> void:
-	if game.result.is_empty() and game.awaiting.is_empty():
-		game.advance()
+	if not game.result.is_empty():
+		return
+	if not game.awaiting.is_empty():
+		_auto_actions()
+		return
+	game.advance()
+	_refresh()
+
+
+## Optional hands-free behaviours for the human seat:
+## - no_calls: pon/chi/kan offers are passed automatically (ron offers are
+##   a different awaiting kind and always stop for a decision).
+## - auto_tsumogiri: after riichi, discard the drawn tile automatically,
+##   but stop when a tsumo win or a kan decision is on the table.
+func _auto_actions() -> void:
+	var a: Dictionary = game.awaiting
+	if a["kind"] == "claims_call" and no_calls:
+		game.human_act({"type": "pass"})
+		_refresh()
+	elif a["kind"] == "post_draw" and auto_tsumogiri and game.players[0]["riichi"]:
+		if not a["can_tsumo"] and a["ankan"].is_empty() and a["kakan"].is_empty():
+			game.human_act({"type": "discard", "tile": game.drawn_tile, "riichi": false})
+			_refresh()
+
+
+## Right-click = pass a call/ron offer (or cancel riichi declaration mode).
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		_right_click_pass()
+
+
+func _right_click_pass() -> void:
+	if game == null:
+		return
+	if game.awaiting.is_empty():
+		if riichi_mode:
+			riichi_mode = false
+			_refresh()
+		return
+	var kind: String = game.awaiting["kind"]
+	if kind == "claims_call" or kind == "claims_ron":
+		game.human_act({"type": "pass"})
 		_refresh()
 
 
@@ -400,6 +451,9 @@ func _tile_ja(name: String) -> String:
 # ---------------- human actions ----------------
 
 func _on_hand_gui_input(event: InputEvent, tile: String) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
+		_right_click_pass()
+		return
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		_on_tile_clicked(tile)
 
