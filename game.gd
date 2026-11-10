@@ -1,12 +1,13 @@
 extends RefCounted
-## Mahjong game flow (Phase 3-4a): one full round (kyoku) state machine.
-## Four seats, simple CPU policy for every seat so a whole round can be
-## simulated headlessly; the interactive UI (3-4b) will drive seat 0 with
-## the same primitives. Rules/math live in rules.gd and yaku.gd.
+## Mahjong game flow (Phase 3-4): one full round (kyoku) as a step-driven
+## state machine. With human_seat = -1 every seat is CPU-driven and a whole
+## round can be simulated headlessly (play_auto_round). With a human seat,
+## advance() stops at that seat's decisions (see `awaiting`) and the UI
+## resumes the flow with human_act(). Rules/math live in rules.gd / yaku.gd.
 ##
 ## Player state: {hand: Array[String] closed tiles, melds: Array,
-##   discards: Array[String], riichi: bool, riichi_declared_turn: int,
-##   ippatsu: bool, furiten_temp: bool, furiten_riichi: bool, score: int}
+##   discards: Array[String], riichi: bool, ippatsu: bool,
+##   furiten_temp: bool, furiten_riichi: bool, score: int, first_turn: bool}
 ## Meld: {"kind": "chi"|"pon"|"kan_open"|"kan_closed", "tile": index,
 ##        "tiles": Array[String], "from": seat}
 
@@ -21,16 +22,31 @@ var round_wind := 27
 var dealer := 0
 var honba := 0
 var sticks := 0  # riichi sticks on the table (1000 each)
+var human_seat := -1
 
 var players: Array = []
 var live: Array = []       # drawable wall (pop_back draws)
 var dead: Array = []       # 14 dead-wall tiles: rinshan 0-3, indicators 4..
 var rinshan_ptr := 0
 var kan_count := 0
-var turn := 0
-var actions := 0
 var any_calls := false
 var result: Dictionary = {}
+
+# flow state
+var phase := "idle"  # draw | post_draw | discard_only | claims | done
+var turn := 0
+var drawn_tile := ""
+var drawn_from_rinshan := false
+var pending_rinshan := false
+var claim_tile := ""
+var claim_from := -1
+var claim_kind := "discard"  # discard | kakan | ankan
+var claim_stage := "ron"     # ron | pon | chi | complete_kan | next
+var claim_was_riichi := false
+var kan_seat := -1
+var kan_pending_tile := ""
+var awaiting: Dictionary = {}
+var steps := 0
 
 var _rng := RandomNumberGenerator.new()
 
@@ -47,15 +63,18 @@ func start_round(seed_value: int) -> void:
 			"score": scores[s], "first_turn": true,
 		})
 	var wall := _build_wall()
-	wall.shuffle()
 	live = wall.slice(0, 122)
 	dead = wall.slice(122, 136)
 	rinshan_ptr = 0
 	kan_count = 0
 	turn = dealer
-	actions = 0
 	any_calls = false
 	result = {}
+	phase = "draw"
+	drawn_tile = ""
+	pending_rinshan = false
+	awaiting = {}
+	steps = 0
 	for s in 4:
 		for i in 13:
 			players[s]["hand"].append(live.pop_back())
@@ -224,7 +243,7 @@ func can_ron(seat: int, tile_idx: int, extra: Dictionary = {}, tile_str: String 
 		ex["red_count"] = _red_count(seat) + 1
 	var closed: Array = []
 	closed.assign(players[seat]["hand"])
-	closed.append(_tile_name(tile_idx, seat))
+	closed.append(_tile_name(tile_idx))
 	var cc := Rules.counts_from_tiles(closed)
 	var ev: Dictionary = Yaku.evaluate(cc, p["melds"], tile_idx, _win_ctx(seat, false, ex))
 	return ev
@@ -253,7 +272,7 @@ func _find_tile(seat: int, tile_idx: int) -> String:
 	return red
 
 
-func _tile_name(tile_idx: int, _seat: int) -> String:
+func _tile_name(tile_idx: int) -> String:
 	# canonical (non-red) name for an index
 	if tile_idx >= 27:
 		return ["ton", "nan", "shaa", "pei", "haku", "hatsu", "chun"][tile_idx - 27]
@@ -269,7 +288,7 @@ func _remove_from_hand(seat: int, tile_name: String) -> void:
 # ---------------- payments ----------------
 
 func _apply_win(winners: Array, from_seat: int, is_tsumo: bool) -> void:
-	# winners: [{seat, ev}] ; from_seat = discarder for ron, winner for tsumo self
+	# winners: [{seat, ev}] ; from_seat = discarder for ron, winner seat for tsumo
 	for w in winners:
 		var seat: int = w["seat"]
 		var ev: Dictionary = w["ev"]
@@ -301,6 +320,8 @@ func _finish(reason: String, extra: Dictionary = {}) -> Dictionary:
 	result = {"reason": reason, "scores": scores.duplicate(), "sticks": sticks, "honba": honba}
 	for k in extra:
 		result[k] = extra[k]
+	phase = "done"
+	awaiting = {}
 	return result
 
 
@@ -310,8 +331,6 @@ func _cpu_choose_discard(seat: int) -> Dictionary:
 	# returns {tile: String, riichi: bool}
 	var p: Dictionary = players[seat]
 	var hand: Array = p["hand"]
-	if p["riichi"]:
-		return {"tile": hand[hand.size() - 1], "riichi": false}  # tsumogiri (drawn tile is last after sort? no: appended) -> handled by caller passing drawn last
 	var c := Rules.counts_from_tiles(hand)
 	var meld_n: int = p["melds"].size()
 	# pass 1: shanten only (cheap); pass 2: ukeire only among the best
@@ -347,85 +366,290 @@ func _cpu_choose_discard(seat: int) -> Dictionary:
 	return {"tile": best_tile, "riichi": best_riichi}
 
 
-# ---------------- main loop ----------------
+# ---------------- flow: advance / steps ----------------
 
 func play_auto_round() -> Dictionary:
-	while result.is_empty() and actions < 600:
-		actions += 1
-		_take_turn(turn)
+	advance()
+	while result.is_empty() and steps < 4000:
+		advance()
 	return result if not result.is_empty() else _finish("abortive:too_many_actions")
 
 
-func _take_turn(seat: int) -> void:
+## Run steps until the round ends or a human decision is needed.
+func advance() -> void:
+	while result.is_empty() and awaiting.is_empty() and steps < 4000:
+		steps += 1
+		_step()
+
+
+func _step() -> void:
+	match phase:
+		"draw":
+			_step_draw()
+		"post_draw":
+			_step_post_draw()
+		"discard_only":
+			_step_discard_only()
+		"claims":
+			_step_claims()
+
+
+func _step_draw() -> void:
+	var seat := turn
 	var p: Dictionary = players[seat]
 	p["furiten_temp"] = false
-	# draw (normal)
+	if pending_rinshan:
+		pending_rinshan = false
+		drawn_from_rinshan = true
+		drawn_tile = dead[rinshan_ptr]
+		rinshan_ptr += 1
+		p["hand"].append(drawn_tile)
+		phase = "post_draw"
+		return
+	drawn_from_rinshan = false
 	if live.is_empty():
 		_exhaustive_draw()
 		return
-	var drawn: String = live.pop_back()
-	p["hand"].append(drawn)
-	_after_draw(seat, drawn, false)
+	drawn_tile = live.pop_back()
+	p["hand"].append(drawn_tile)
+	phase = "post_draw"
 
 
-func _after_draw(seat: int, drawn: String, from_rinshan: bool) -> void:
+func _step_post_draw() -> void:
+	var seat := turn
 	var p: Dictionary = players[seat]
-	var drawn_idx := Rules.tile_index(drawn)
-	# tsumo?
+	var drawn_idx := Rules.tile_index(drawn_tile)
 	var extra := {}
-	if from_rinshan:
+	if drawn_from_rinshan:
 		extra["rinshan"] = true
-	if live.is_empty() and not from_rinshan:
+	if live.is_empty() and not drawn_from_rinshan:
 		extra["haitei"] = true
 	var ev := can_tsumo(seat, drawn_idx, extra)
+	var kans := legal_kans(seat)
+	var can_kyushu: bool = p["first_turn"] and not any_calls and kyushu_kinds(p["hand"]) >= 9
+	if seat == human_seat:
+		awaiting = {
+			"kind": "post_draw", "seat": seat,
+			"can_tsumo": ev.get("valid", false), "tsumo_ev": ev,
+			"ankan": kans["ankan"], "kakan": kans["kakan"],
+			"kyushu": can_kyushu, "drawn": drawn_tile,
+		}
+		return
+	# CPU
 	if ev.get("valid", false):
 		_apply_win([{"seat": seat, "ev": ev}], seat, true)
-		_finish("tsumo", {"winner": seat})
+		_finish("tsumo", {"winner": seat, "ev": ev})
 		return
-	# kyushu (first turn, no calls yet)
-	if p["first_turn"] and not any_calls and kyushu_kinds(p["hand"]) >= 9:
+	if can_kyushu:
 		_finish("abortive:kyushu", {})
 		return
-	# kans: declaring one hands the rest of the turn to the kan flow
-	# (rinshan draw -> possibly another kan -> discard). Never fall through.
-	var kans := legal_kans(seat)
 	if not kans["ankan"].is_empty():
 		_declare_ankan(seat, kans["ankan"][0])
 		return
 	if not kans["kakan"].is_empty():
 		_declare_kakan(seat, kans["kakan"][0])
 		return
-	_discard_phase(seat, drawn)
+	_cpu_discard(seat)
 
 
-func _discard_phase(seat: int, drawn: String) -> void:
+func _step_discard_only() -> void:
+	var seat := turn
+	if seat == human_seat:
+		awaiting = {"kind": "discard_only", "seat": seat}
+		return
+	_cpu_discard(seat)
+
+
+func _cpu_discard(seat: int) -> void:
 	var p: Dictionary = players[seat]
-	var choice: Dictionary
 	if p["riichi"]:
-		choice = {"tile": drawn, "riichi": false}
-	else:
-		# evaluate discards on the sorted hand (drawn tile included)
-		_sort_hand(p["hand"])
-		choice = _cpu_choose_discard(seat)
-	var tile: String = choice["tile"]
+		_do_discard(seat, drawn_tile if phase == "post_draw" else p["hand"][p["hand"].size() - 1], false)
+		return
+	_sort_hand(p["hand"])
+	var choice := _cpu_choose_discard(seat)
+	_do_discard(seat, choice["tile"], choice["riichi"])
+
+
+func _do_discard(seat: int, tile: String, declare_riichi: bool) -> void:
+	var p: Dictionary = players[seat]
 	_remove_from_hand(seat, tile)
 	p["discards"].append(tile)
 	p["first_turn"] = false
-	var just_declared := false
-	if choice.get("riichi", false) and not p["riichi"]:
+	claim_was_riichi = false
+	if declare_riichi and not p["riichi"]:
 		p["riichi"] = true
 		p["ippatsu"] = true
-		just_declared = true
+		claim_was_riichi = true
 		p["score"] -= 1000
 		scores[seat] = p["score"]
 		sticks += 1
-		if _all_riichi():
-			_finish("abortive:suuriichi", {})
-			return
 	elif p["ippatsu"]:
-		# the riichi player's ippatsu window closes after their next discard
+		# ippatsu window closes after the riichi player's next discard
 		p["ippatsu"] = false
-	_resolve_discard(seat, tile, false)
+	claim_tile = tile
+	claim_from = seat
+	claim_kind = "discard"
+	claim_stage = "ron"
+	phase = "claims"
+
+
+# ---------------- claims ----------------
+
+func _step_claims() -> void:
+	match claim_stage:
+		"ron":
+			_claims_ron_stage()
+		"pon":
+			_claims_pon_stage()
+		"chi":
+			_claims_chi_stage()
+		"complete_kan":
+			_complete_kan()
+		"next":
+			_claims_next()
+
+
+func _ron_candidates() -> Dictionary:
+	# {cpu_winners: [{seat, ev}], human_ev: Dictionary or {}}
+	var tile_idx := Rules.tile_index(claim_tile)
+	var out := {"cpu_winners": [], "human_ev": {}}
+	for k in range(1, 4):
+		var s := (claim_from + k) % 4
+		if s == kan_seat and claim_kind != "discard":
+			continue  # the kan declarer cannot ron their own kan tile
+		var extra := {}
+		if claim_kind != "discard":
+			extra["chankan"] = true
+		if claim_kind == "discard" and live.is_empty():
+			extra["houtei"] = true
+		var ev := can_ron(s, tile_idx, extra, claim_tile)
+		if not ev.get("valid", false):
+			continue
+		if claim_kind == "ankan":
+			# only a kokushi can ron a closed kan
+			var has_kokushi := false
+			for y in ev.get("yaku", []):
+				if y["name"] == "kokushi":
+					has_kokushi = true
+			if not has_kokushi:
+				continue
+		if s == human_seat:
+			out["human_ev"] = ev
+		else:
+			out["cpu_winners"].append({"seat": s, "ev": ev})
+	return out
+
+
+func _claims_ron_stage() -> void:
+	var cands := _ron_candidates()
+	var human_ev: Dictionary = cands["human_ev"]
+	if not human_ev.is_empty():
+		awaiting = {
+			"kind": "claims_ron", "seat": human_seat, "tile": claim_tile,
+			"from": claim_from, "ev": human_ev, "chankan": claim_kind != "discard",
+		}
+		return
+	_resolve_ron_winners(cands["cpu_winners"])
+
+
+func _resolve_ron_winners(winners: Array) -> void:
+	if winners.size() >= 3:
+		_finish("abortive:sanchahou", {})
+		return
+	if not winners.is_empty():
+		_apply_win(winners, claim_from, false)
+		var seats: Array = winners.map(func(w): return w["seat"])
+		_finish("ron" if winners.size() == 1 else "double_ron",
+			{"winners": seats, "from": claim_from, "ev": winners[0]["ev"]})
+		return
+	# nobody ronned: four riichi / four winds abortives trigger now
+	if claim_kind == "discard" and claim_was_riichi and _all_riichi():
+		_finish("abortive:suuriichi", {})
+		return
+	if claim_kind == "discard" and _check_four_winds():
+		_finish("abortive:suufon", {})
+		return
+	claim_stage = "pon" if claim_kind == "discard" else "complete_kan"
+
+
+func _claims_pon_stage() -> void:
+	var tile_idx := Rules.tile_index(claim_tile)
+	# find the (unique) pon/daiminkan claimant
+	var claimant := -1
+	var is_kan := false
+	for k in range(1, 4):
+		var s := (claim_from + k) % 4
+		if players[s]["riichi"]:
+			continue
+		var c := _counts(s)
+		if legal_daiminkan(c, tile_idx):
+			claimant = s
+			is_kan = true
+			break
+		if legal_pon(c, tile_idx):
+			claimant = s
+			is_kan = false
+			break
+	if claimant == -1:
+		claim_stage = "chi"
+		return
+	if claimant == human_seat:
+		awaiting = {
+			"kind": "claims_call", "seat": human_seat, "tile": claim_tile,
+			"from": claim_from, "can_pon": not is_kan, "can_daiminkan": is_kan,
+			"chi_options": [],
+		}
+		return
+	# CPU policy: call if it does not raise shanten
+	var c2 := _counts(claimant)
+	var meld_n: int = players[claimant]["melds"].size()
+	var before := Rules.shanten_for(c2, meld_n)
+	var cc: Array = c2.duplicate()
+	cc[tile_idx] -= 3 if is_kan else 2
+	if Rules.shanten_for(cc, meld_n + 1) <= before:
+		if is_kan:
+			_do_daiminkan(claimant, claim_from, claim_tile)
+		else:
+			_do_pon(claimant, claim_from, claim_tile)
+	else:
+		claim_stage = "chi"
+
+
+func _claims_chi_stage() -> void:
+	var tile_idx := Rules.tile_index(claim_tile)
+	var nxt := (claim_from + 1) % 4
+	if players[nxt]["riichi"]:
+		claim_stage = "next"
+		return
+	var c := _counts(nxt)
+	var opts := legal_chi(c, tile_idx)
+	if opts.is_empty():
+		claim_stage = "next"
+		return
+	if nxt == human_seat:
+		awaiting = {
+			"kind": "claims_call", "seat": human_seat, "tile": claim_tile,
+			"from": claim_from, "can_pon": false, "can_daiminkan": false,
+			"chi_options": opts,
+		}
+		return
+	# CPU policy: chi if it lowers shanten
+	var meld_n: int = players[nxt]["melds"].size()
+	var before := Rules.shanten_for(c, meld_n)
+	var start: int = opts[0]
+	var cc: Array = c.duplicate()
+	for d in [0, 1, 2]:
+		if start + d != tile_idx:
+			cc[start + d] -= 1
+	if Rules.shanten_for(cc, meld_n + 1) < before:
+		_do_chi(nxt, claim_from, claim_tile, start)
+	else:
+		claim_stage = "next"
+
+
+func _claims_next() -> void:
+	turn = (claim_from + 1) % 4
+	phase = "draw"
 
 
 func _all_riichi() -> bool:
@@ -433,70 +657,6 @@ func _all_riichi() -> bool:
 		if not players[s]["riichi"]:
 			return false
 	return true
-
-
-func _resolve_discard(from_seat: int, tile: String, is_chankan: bool) -> void:
-	var tile_idx := Rules.tile_index(tile)
-	# ron claims (in turn order starting after the discarder)
-	var winners: Array = []
-	for k in range(1, 4):
-		var s := (from_seat + k) % 4
-		var extra := {}
-		if is_chankan:
-			extra["chankan"] = true
-		if live.is_empty():
-			extra["houtei"] = true
-		var ev := can_ron(s, tile_idx, extra, tile)
-		if ev.get("valid", false):
-			winners.append({"seat": s, "ev": ev})
-	if winners.size() >= 3:
-		_finish("abortive:sanchahou", {})
-		return
-	if not winners.is_empty():
-		_apply_win(winners, from_seat, false)
-		_finish("ron" if winners.size() == 1 else "double_ron",
-			{"winners": winners.map(func(w): return w["seat"]), "from": from_seat})
-		return
-	# mark temp furiten for players who could have ronned but were furiten-blocked only:
-	# (policy: CPU always rons when legal, so no voluntary passes happen here)
-	# four winds abortive: first go-around, all first discards the same wind, no calls
-	if _check_four_winds():
-		_finish("abortive:suufon", {})
-		return
-	# daiminkan / pon by others (CPU: pon/kan if it does not raise shanten)
-	for k in range(1, 4):
-		var s := (from_seat + k) % 4
-		if players[s]["riichi"]:
-			continue
-		var c := _counts(s)
-		if legal_daiminkan(c, tile_idx):
-			_do_daiminkan(s, from_seat, tile)
-			return
-		if legal_pon(c, tile_idx):
-			# pon if resulting shanten <= current shanten
-			var before := Rules.shanten_for(c, players[s]["melds"].size())
-			var cc: Array = c.duplicate()
-			cc[tile_idx] -= 2
-			if Rules.shanten_for(cc, players[s]["melds"].size() + 1) <= before:
-				_do_pon(s, from_seat, tile)
-				return
-	# chi by next seat
-	var nxt := (from_seat + 1) % 4
-	if not players[nxt]["riichi"]:
-		var c2 := _counts(nxt)
-		var opts := legal_chi(c2, tile_idx)
-		if not opts.is_empty():
-			var before2 := Rules.shanten_for(c2, players[nxt]["melds"].size())
-			var start: int = opts[0]
-			var cc2: Array = c2.duplicate()
-			for d in [0, 1, 2]:
-				if start + d != tile_idx:
-					cc2[start + d] -= 1
-			if Rules.shanten_for(cc2, players[nxt]["melds"].size() + 1) < before2:
-				_do_chi(nxt, from_seat, tile, start)
-				return
-	# no calls: next turn
-	turn = (from_seat + 1) % 4
 
 
 func _check_four_winds() -> bool:
@@ -514,6 +674,8 @@ func _check_four_winds() -> bool:
 	return true
 
 
+# ---------------- meld actions ----------------
+
 func _do_pon(seat: int, from_seat: int, tile: String) -> void:
 	any_calls = true
 	_clear_all_ippatsu()
@@ -526,7 +688,7 @@ func _do_pon(seat: int, from_seat: int, tile: String) -> void:
 	players[seat]["melds"].append({"kind": "pon", "tile": idx, "tiles": used, "from": from_seat})
 	players[from_seat]["discards"].pop_back()
 	turn = seat
-	_discard_phase(seat, "")
+	phase = "discard_only"
 
 
 func _do_chi(seat: int, from_seat: int, tile: String, start: int) -> void:
@@ -542,7 +704,7 @@ func _do_chi(seat: int, from_seat: int, tile: String, start: int) -> void:
 	players[seat]["melds"].append({"kind": "chi", "tile": start, "tiles": used, "from": from_seat})
 	players[from_seat]["discards"].pop_back()
 	turn = seat
-	_discard_phase(seat, "")
+	phase = "discard_only"
 
 
 func _do_daiminkan(seat: int, from_seat: int, tile: String) -> void:
@@ -557,11 +719,10 @@ func _do_daiminkan(seat: int, from_seat: int, tile: String) -> void:
 	players[seat]["melds"].append({"kind": "kan_open", "tile": idx, "tiles": used, "from": from_seat})
 	players[from_seat]["discards"].pop_back()
 	turn = seat
-	_kan_draw(seat)
+	_after_kan(seat)
 
 
-func _declare_ankan(seat: int, tile_idx: int) -> bool:
-	# returns true if the round ended (rinshan tsumo / kokushi chankan)
+func _declare_ankan(seat: int, tile_idx: int) -> void:
 	any_calls = true
 	_clear_all_ippatsu()
 	var used: Array = []
@@ -570,48 +731,41 @@ func _declare_ankan(seat: int, tile_idx: int) -> bool:
 		_remove_from_hand(seat, t)
 		used.append(t)
 	players[seat]["melds"].append({"kind": "kan_closed", "tile": tile_idx, "tiles": used, "from": seat})
-	# kokushi-only chankan on ankan
-	for k in range(1, 4):
-		var s := (seat + k) % 4
-		var c := _counts(s)
-		c[tile_idx] += 1
-		if Rules.shanten_kokushi(c) == -1:
-			var ev := can_ron(s, tile_idx, {"chankan": true})
-			if ev.get("valid", false):
-				_apply_win([{"seat": s, "ev": ev}], seat, false)
-				_finish("ron", {"winners": [s], "from": seat})
-				return true
-	_kan_draw(seat)
-	return not result.is_empty()
+	kan_seat = seat
+	kan_pending_tile = ""
+	claim_tile = _tile_name(tile_idx)
+	claim_from = seat
+	claim_kind = "ankan"
+	claim_stage = "ron"
+	claim_was_riichi = false
+	phase = "claims"
 
 
-func _declare_kakan(seat: int, tile_idx: int) -> bool:
+func _declare_kakan(seat: int, tile_idx: int) -> void:
 	any_calls = true
-	# chankan check first (others may ron the added tile)
-	for k in range(1, 4):
-		var s := (seat + k) % 4
-		var ev := can_ron(s, tile_idx, {"chankan": true})
-		if ev.get("valid", false):
-			_apply_win([{"seat": s, "ev": ev}], seat, false)
-			_finish("ron", {"winners": [s], "from": seat})
-			return true
-	_clear_all_ippatsu()
-	var t := _find_tile(seat, tile_idx)
-	_remove_from_hand(seat, t)
-	for m in players[seat]["melds"]:
-		if m["kind"] == "pon" and m["tile"] == tile_idx:
-			m["kind"] = "kan_open"
-			m["tiles"].append(t)
-			break
-	_kan_draw(seat)
-	return not result.is_empty()
+	kan_seat = seat
+	kan_pending_tile = _find_tile(seat, tile_idx)
+	_remove_from_hand(seat, kan_pending_tile)
+	claim_tile = kan_pending_tile
+	claim_from = seat
+	claim_kind = "kakan"
+	claim_stage = "ron"
+	claim_was_riichi = false
+	phase = "claims"
 
 
-func _kan_draw(seat: int) -> void:
-	if kan_count >= 4:
-		# four kans: abortive unless all by one player (that is suukantsu territory;
-		# the round continues in real rules for a single player, simplified: continue)
-		pass
+func _complete_kan() -> void:
+	if claim_kind == "kakan":
+		_clear_all_ippatsu()
+		for m in players[kan_seat]["melds"]:
+			if m["kind"] == "pon" and m["tile"] == Rules.tile_index(kan_pending_tile):
+				m["kind"] = "kan_open"
+				m["tiles"].append(kan_pending_tile)
+				break
+	_after_kan(kan_seat)
+
+
+func _after_kan(seat: int) -> void:
 	kan_count += 1
 	if kan_count == 4:
 		var owners := {}
@@ -625,10 +779,9 @@ func _kan_draw(seat: int) -> void:
 	# move one live tile to the dead wall end (keeps the dead wall at 14)
 	if not live.is_empty():
 		live.pop_back()
-	var drawn: String = dead[rinshan_ptr]
-	rinshan_ptr += 1
-	players[seat]["hand"].append(drawn)
-	_after_draw(seat, drawn, true)
+	turn = seat
+	pending_rinshan = true
+	phase = "draw"
 
 
 func _clear_all_ippatsu() -> void:
@@ -636,13 +789,75 @@ func _clear_all_ippatsu() -> void:
 		players[s]["ippatsu"] = false
 
 
+# ---------------- human actions ----------------
+
+func human_act(action: Dictionary) -> void:
+	if awaiting.is_empty():
+		return
+	var kind: String = awaiting["kind"]
+	var was_pon_offer: bool = awaiting.get("can_pon", false) or awaiting.get("can_daiminkan", false)
+	var seat := human_seat
+	awaiting = {}
+	match kind:
+		"post_draw":
+			match str(action.get("type", "")):
+				"tsumo":
+					var extra := {}
+					if drawn_from_rinshan:
+						extra["rinshan"] = true
+					if live.is_empty() and not drawn_from_rinshan:
+						extra["haitei"] = true
+					var ev := can_tsumo(seat, Rules.tile_index(drawn_tile), extra)
+					if ev.get("valid", false):
+						_apply_win([{"seat": seat, "ev": ev}], seat, true)
+						_finish("tsumo", {"winner": seat, "ev": ev})
+				"kyushu":
+					_finish("abortive:kyushu", {})
+				"ankan":
+					_declare_ankan(seat, int(action["tile"]))
+				"kakan":
+					_declare_kakan(seat, int(action["tile"]))
+				"discard":
+					_do_discard(seat, str(action["tile"]), bool(action.get("riichi", false)))
+		"discard_only":
+			if action.get("type") == "discard":
+				_do_discard(seat, str(action["tile"]), false)
+		"claims_ron":
+			if action.get("type") == "ron":
+				var cands := _ron_candidates()
+				var winners: Array = cands["cpu_winners"]
+				winners.append({"seat": seat, "ev": cands["human_ev"]})
+				_resolve_ron_winners(winners)
+			else:  # pass: furiten applies
+				var p: Dictionary = players[seat]
+				if p["riichi"]:
+					p["furiten_riichi"] = true
+				else:
+					p["furiten_temp"] = true
+				var cands2 := _ron_candidates()
+				_resolve_ron_winners(cands2["cpu_winners"])
+		"claims_call":
+			match str(action.get("type", "")):
+				"pon":
+					_do_pon(seat, claim_from, claim_tile)
+				"daiminkan":
+					_do_daiminkan(seat, claim_from, claim_tile)
+				"chi":
+					_do_chi(seat, claim_from, claim_tile, int(action["start"]))
+				"pass":
+					# passing a pon/daiminkan offer still allows the chi stage;
+					# passing a chi offer ends the claims for this discard
+					claim_stage = "chi" if was_pon_offer else "next"
+	advance()
+
+
+# ---------------- round end ----------------
+
 func _exhaustive_draw() -> void:
 	var tenpai: Array = []
-	var gains := {}
 	for s in 4:
 		var c := _counts(s)
-		var is_ten := Rules.shanten_for(c, players[s]["melds"].size()) == 0
-		tenpai.append(is_ten)
+		tenpai.append(Rules.shanten_for(c, players[s]["melds"].size()) == 0)
 	var n := 0
 	for t in tenpai:
 		if t:
@@ -653,7 +868,6 @@ func _exhaustive_draw() -> void:
 		for s in 4:
 			players[s]["score"] += gain if tenpai[s] else -lose
 			scores[s] = players[s]["score"]
-	# dealer tenpai keeps the seat; honba grows (sticks stay)
 	honba += 1
 	_finish("ryuukyoku", {"tenpai": tenpai})
 
@@ -671,7 +885,7 @@ func next_round_state() -> Dictionary:
 		elif result.has("winners"):
 			winners = result["winners"]
 		dealer_keeps = winners.has(dealer)
-	elif result.get("reason") == "ryuukyoku":
+	elif reason == "ryuukyoku":
 		dealer_keeps = result["tenpai"][dealer]
 	var nd := dealer
 	var nh := honba
@@ -679,6 +893,6 @@ func next_round_state() -> Dictionary:
 		nh += 1
 	else:
 		nd = (dealer + 1) % 4
-		if result.get("reason", "").begins_with("abortive"):
+		if reason.begins_with("abortive"):
 			nh += 1
 	return {"dealer": nd, "honba": nh, "sticks": sticks}
