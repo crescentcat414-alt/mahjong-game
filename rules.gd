@@ -77,6 +77,32 @@ static func effective_tiles(counts13: Array) -> Array:
 	return out
 
 
+## The tile that a dora indicator points to.
+static func next_tile_index(i: int) -> int:
+	if i < 27:
+		var base := int(i / 9) * 9
+		return base + (i - base + 1) % 9
+	if i < 31:
+		return 27 + (i - 27 + 1) % 4
+	return 31 + (i - 31 + 1) % 3
+
+
+## Permanent furiten: a 13-tile hand in tenpai whose winning tiles include
+## a tile the player has already discarded. (Temporary and riichi furiten
+## are game-state matters handled with the game flow.)
+static func is_furiten(counts13: Array, own_discard_indices: Array) -> bool:
+	for w in winning_tiles(counts13):
+		if own_discard_indices.has(w):
+			return true
+	return false
+
+
+## Riichi may be declared with a closed tenpai hand and at least 1000 points.
+## (Closed-ness is the caller's state; this checks the hand and the points.)
+static func can_riichi(counts13: Array, points: int) -> bool:
+	return points >= 1000 and shanten(counts13) == 0
+
+
 # --- standard form (4 sets + 1 pair) ---
 
 static func shanten_standard(counts: Array) -> int:

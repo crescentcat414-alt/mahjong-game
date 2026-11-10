@@ -103,6 +103,14 @@ static func score_points(han: int, fu: int, yakuman_count: int, is_dealer: bool,
 
 # ---------- main evaluation ----------
 
+## Count dora in a full 14-tile count array (closed + melds) from indicators.
+static func count_dora(full: Array, indicators: Array) -> int:
+	var n := 0
+	for ind in indicators:
+		n += full[Rules.next_tile_index(ind)]
+	return n
+
+
 static func evaluate(closed_counts: Array, melds: Array, win_tile: int, ctx: Dictionary) -> Dictionary:
 	var is_tsumo: bool = ctx.get("is_tsumo", false)
 	var seat_wind: int = ctx.get("seat_wind", 27)
@@ -152,7 +160,29 @@ static func evaluate(closed_counts: Array, melds: Array, win_tile: int, ctx: Dic
 			continue
 		if not best.get("valid", false) or _score_value(cand["score"]) > _score_value(best["score"]):
 			best = cand
+	if best.get("valid", false):
+		_apply_dora(best, full, ctx, is_dealer, is_tsumo)
 	return best
+
+
+## Dora / ura-dora / red fives add han (never a yaku by themselves).
+## ctx keys: dora_indicators, ura_indicators (tile indices), red_count.
+static func _apply_dora(result: Dictionary, full: Array, ctx: Dictionary, is_dealer: bool, is_tsumo: bool) -> void:
+	var d := count_dora(full, ctx.get("dora_indicators", []))
+	var u := 0
+	if ctx.get("riichi", false) or ctx.get("double_riichi", false):
+		u = count_dora(full, ctx.get("ura_indicators", []))
+	var r: int = ctx.get("red_count", 0)
+	if d > 0:
+		result["yaku"].append({"name": "dora", "han": d})
+	if u > 0:
+		result["yaku"].append({"name": "ura_dora", "han": u})
+	if r > 0:
+		result["yaku"].append({"name": "aka_dora", "han": r})
+	result["dora"] = d + u + r
+	if d + u + r > 0:
+		result["han"] += d + u + r
+		result["score"] = score_points(result["han"], result["fu"], 0, is_dealer, is_tsumo)
 
 
 static func _score_value(score: Dictionary) -> int:
@@ -171,11 +201,12 @@ static func _han_sum(yaku: Array) -> int:
 
 
 static func _add_context_yaku(yaku: Array, ctx: Dictionary, is_closed: bool, _is_chii: bool) -> void:
-	if ctx.get("double_riichi", false):
+	var has_riichi: bool = ctx.get("double_riichi", false) or ctx.get("riichi", false)
+	if is_closed and ctx.get("double_riichi", false):
 		yaku.append({"name": "double_riichi", "han": 2})
-	elif ctx.get("riichi", false):
+	elif is_closed and ctx.get("riichi", false):
 		yaku.append({"name": "riichi", "han": 1})
-	if ctx.get("ippatsu", false):
+	if has_riichi and ctx.get("ippatsu", false):
 		yaku.append({"name": "ippatsu", "han": 1})
 	if ctx.get("is_tsumo", false) and is_closed:
 		yaku.append({"name": "menzen_tsumo", "han": 1})
