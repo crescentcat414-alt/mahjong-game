@@ -92,7 +92,7 @@ func _build_ui() -> void:
 	add_child(margin)
 
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 6)
+	vbox.add_theme_constant_override("separation", 4)
 	margin.add_child(vbox)
 
 	# top row: title/info + new match
@@ -107,7 +107,8 @@ func _build_ui() -> void:
 	restart.pressed.connect(_new_match)
 	top.add_child(restart)
 
-	# table area (expands); the hand stays pinned below it
+	# table area (expands); every region inside has a FIXED height, so no
+	# amount of discards can push the hand / buttons off screen
 	var table := VBoxContainer.new()
 	table.add_theme_constant_override("separation", 4)
 	table.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -137,17 +138,12 @@ func _build_ui() -> void:
 	center.add_child(dora_box)
 	mid.add_child(_build_cpu_area(1))
 
-	# human area: river, then melds+hand
-	var human_title := Label.new()
-	human_title.text = "あなた"
-	vbox.add_child(human_title)
+	# human area: river (fixed height, clipped), then melds+hand
 	human_river = GridContainer.new()
 	human_river.columns = 12
 	human_river.add_theme_constant_override("h_separation", 3)
 	human_river.add_theme_constant_override("v_separation", 3)
-	human_river.custom_minimum_size = Vector2(0, 100)
-	human_river.clip_contents = true
-	vbox.add_child(human_river)
+	vbox.add_child(_fixed_frame(human_river, 105.0))
 	var hand_row := HBoxContainer.new()
 	hand_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(hand_row)
@@ -159,22 +155,43 @@ func _build_ui() -> void:
 	human_meld_box.add_theme_constant_override("separation", 6)
 	hand_row.add_child(human_meld_box)
 
-	# status + actions + result
+	# status + actions (fixed flow: always on screen)
 	status_label = Label.new()
 	status_label.add_theme_font_size_override("font_size", 16)
 	vbox.add_child(status_label)
 	action_box = HBoxContainer.new()
 	action_box.add_theme_constant_override("separation", 8)
 	vbox.add_child(action_box)
+
+	# result panel is an OVERLAY (centered), never part of the flow,
+	# so showing it cannot shift the layout either
 	result_panel = PanelContainer.new()
+	result_panel.set_anchors_preset(Control.PRESET_CENTER)
+	result_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	result_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	result_panel.custom_minimum_size = Vector2(560, 0)
 	result_label = Label.new()
 	result_label.add_theme_font_size_override("font_size", 17)
+	result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	result_panel.add_child(result_label)
 	result_panel.visible = false
-	vbox.add_child(result_panel)
+	add_child(result_panel)
 
 
-func _build_cpu_area(seat: int) -> VBoxContainer:
+## Wrap a control in a fixed-height frame that clips any overflow.
+## This is what guarantees the layout can never drift: containers inside
+## may ask for more room as tiles pile up, but the frame never grows.
+func _fixed_frame(inner: Control, height: float) -> Control:
+	var frame := Control.new()
+	frame.custom_minimum_size = Vector2(0, height)
+	frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	frame.clip_contents = true
+	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
+	frame.add_child(inner)
+	return frame
+
+
+func _build_cpu_area(seat: int) -> Control:
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 3)
 	var info := Label.new()
@@ -183,16 +200,15 @@ func _build_cpu_area(seat: int) -> VBoxContainer:
 	var backs := HBoxContainer.new()
 	backs.add_theme_constant_override("separation", 2)
 	box.add_child(backs)
-	var river := GridContainer.new()
-	river.columns = 6
-	river.add_theme_constant_override("h_separation", 3)
-	river.add_theme_constant_override("v_separation", 3)
-	river.custom_minimum_size = Vector2(0, 96)
-	river.clip_contents = true
-	box.add_child(river)
 	var melds := HBoxContainer.new()
 	melds.add_theme_constant_override("separation", 6)
 	box.add_child(melds)
+	# river LAST: inside the fixed frame it is the part that may clip
+	var river := GridContainer.new()
+	river.columns = 8
+	river.add_theme_constant_override("h_separation", 3)
+	river.add_theme_constant_override("v_separation", 3)
+	box.add_child(river)
 	while seat_info.size() <= seat:
 		seat_info.append(null)
 		seat_rivers.append(null)
@@ -202,7 +218,7 @@ func _build_cpu_area(seat: int) -> VBoxContainer:
 	seat_rivers[seat] = river
 	seat_melds[seat] = melds
 	seat_backs[seat] = backs
-	return box
+	return _fixed_frame(box, 204.0)
 
 
 func _new_match() -> void:
@@ -269,8 +285,8 @@ func _refresh() -> void:
 			seat_info[seat].text = "CPU%d（%s家） %d点%s%s" % [seat, wind, p["score"], riichi_mark, turn_mark]
 			_clear(seat_backs[seat])
 			for i in p["hand"].size():
-				seat_backs[seat].add_child(_tile_rect("back", Vector2(22, 33)))
-			_refresh_river(seat_rivers[seat], p["discards"], Vector2(30, 45))
+				seat_backs[seat].add_child(_tile_rect("back", Vector2(18, 27)))
+			_refresh_river(seat_rivers[seat], p["discards"], Vector2(22, 33))
 			_refresh_melds(seat_melds[seat], p["melds"])
 	# human
 	var hp: Dictionary = game.players[0]
@@ -296,9 +312,9 @@ func _refresh_melds(box: HBoxContainer, melds: Array) -> void:
 		one.add_theme_constant_override("separation", 1)
 		for t in m["tiles"]:
 			if m["kind"] == "kan_closed" and (t == m["tiles"][0] or t == m["tiles"][3]):
-				one.add_child(_tile_rect("back", Vector2(30, 45)))
+				one.add_child(_tile_rect("back", Vector2(24, 36)))
 			else:
-				one.add_child(_tile_rect(t, Vector2(30, 45)))
+				one.add_child(_tile_rect(t, Vector2(24, 36)))
 		box.add_child(one)
 
 
