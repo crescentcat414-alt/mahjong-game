@@ -47,6 +47,13 @@ func _run() -> void:
 	if river_rect.size.y > 106:
 		print("FAIL human river frame grew: ", river_rect)
 		ok = false
+	# all three CPU seats must have real estate (the side areas once
+	# collapsed to zero width inside the middle row)
+	for seat in [1, 2, 3]:
+		var r: Rect2 = scene.seat_rivers[seat].get_global_rect()
+		if r.size.x < 150 or r.position.x < 0 or r.end.x > win_size.x:
+			print("FAIL seat ", seat, " river rect: ", r)
+			ok = false
 	if ok:
 		print("ALL TESTS PASSED (layout stays on screen, hand bottom=", hand_rect.end.y, ")")
 	quit()

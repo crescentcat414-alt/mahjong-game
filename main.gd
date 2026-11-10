@@ -181,9 +181,12 @@ func _build_ui() -> void:
 ## Wrap a control in a fixed-height frame that clips any overflow.
 ## This is what guarantees the layout can never drift: containers inside
 ## may ask for more room as tiles pile up, but the frame never grows.
-func _fixed_frame(inner: Control, height: float) -> Control:
+## Width: pass an explicit width for side-by-side use -- content-derived
+## minimums arrive too late and the row overflows (found by playtest).
+func _fixed_frame(inner: Control, height: float, width: float = 0.0) -> Control:
 	var frame := Control.new()
-	frame.custom_minimum_size = Vector2(0, height)
+	var min_x := width if width > 0.0 else inner.get_combined_minimum_size().x
+	frame.custom_minimum_size = Vector2(min_x, height)
 	frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	frame.clip_contents = true
 	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -218,7 +221,7 @@ func _build_cpu_area(seat: int) -> Control:
 	seat_rivers[seat] = river
 	seat_melds[seat] = melds
 	seat_backs[seat] = backs
-	return _fixed_frame(box, 204.0)
+	return _fixed_frame(box, 204.0, 300.0)
 
 
 func _new_match() -> void:
