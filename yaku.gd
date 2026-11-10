@@ -149,6 +149,31 @@ static func evaluate(closed_counts: Array, melds: Array, win_tile: int, ctx: Dic
 	var best: Dictionary = {"valid": false}
 	if melds.is_empty() and Rules.shanten_chiitoi(closed_counts) == -1:
 		var yaku: Array = [{"name": "chiitoitsu", "han": 2}]
+		# suit / terminal family yaku stack with seven pairs too
+		var suits_present := {}
+		var all_th := true
+		var has_honor := false
+		for i in 34:
+			if full[i] > 0:
+				if i < 27:
+					suits_present[int(i / 9)] = true
+				else:
+					has_honor = true
+				if not Rules.TERMINAL_HONOR_INDICES.has(i):
+					all_th = false
+		if all_th:
+			yaku.append({"name": "honroutou", "han": 2})
+		elif suits_present.size() == 1:
+			if has_honor:
+				yaku.append({"name": "honitsu", "han": 3})
+			else:
+				yaku.append({"name": "chinitsu", "han": 6})
+		var has_th := false
+		for i2 in 34:
+			if full[i2] > 0 and Rules.TERMINAL_HONOR_INDICES.has(i2):
+				has_th = true
+		if not has_th:
+			yaku.append({"name": "tanyao", "han": 1})
 		_add_context_yaku(yaku, ctx, is_closed, true)
 		var han := _han_sum(yaku)
 		var sc := score_points(han, 25, 0, is_dealer, is_tsumo)
@@ -158,9 +183,11 @@ static func evaluate(closed_counts: Array, melds: Array, win_tile: int, ctx: Dic
 		var cand := _eval_decomp(decomp, melds, full, win_tile, ctx, is_closed)
 		if not cand.get("valid", false):
 			continue
-		if not best.get("valid", false) or _score_value(cand["score"]) > _score_value(best["score"]):
+		if not best.get("valid", false) or _score_value(cand["score"]) > _score_value(best["score"]) \
+				or (_score_value(cand["score"]) == _score_value(best["score"]) and cand.get("han", 0) > best.get("han", 0)) \
+				or (_score_value(cand["score"]) == _score_value(best["score"]) and cand.get("han", 0) == best.get("han", 0) and cand.get("fu", 0) > best.get("fu", 0)):
 			best = cand
-	if best.get("valid", false):
+	if best.get("valid", false) and best.get("yakuman", 0) == 0:
 		_apply_dora(best, full, ctx, is_dealer, is_tsumo)
 	return best
 
@@ -364,7 +391,9 @@ static func _eval_decomp(decomp: Dictionary, melds: Array, full: Array, win_tile
 			var sc := score_points(0, 0, ym, is_dealer, is_tsumo)
 			return {"valid": true, "yaku": [{"name": "suuankou", "han": 0}], "han": 0,
 				"fu": cand["fu"], "yakuman": ym, "score": sc}
-		if not best.get("valid", false) or _score_value(cand["score"]) > _score_value(best["score"]):
+		if not best.get("valid", false) or _score_value(cand["score"]) > _score_value(best["score"]) \
+				or (_score_value(cand["score"]) == _score_value(best["score"]) and cand["han"] > best["han"]) \
+				or (_score_value(cand["score"]) == _score_value(best["score"]) and cand["han"] == best["han"] and cand["fu"] > best["fu"]):
 			best = cand
 	return best
 
@@ -384,6 +413,7 @@ static func _eval_role(sets: Array, pair_tile: int, role: Dictionary, full: Arra
 	var fu := 20
 	var ankou := 0
 	var trips := 0
+	var kans := 0
 	var seq_starts: Array = []
 	var all_seq := true
 	for si in sets.size():
@@ -392,6 +422,8 @@ static func _eval_role(sets: Array, pair_tile: int, role: Dictionary, full: Arra
 		var t: int = s[1]
 		var open_set: bool = s[2]
 		var is_kan: bool = s[3]
+		if is_kan:
+			kans += 1
 		if kind == "seq":
 			seq_starts.append(t)
 		else:
@@ -456,10 +488,20 @@ static func _eval_role(sets: Array, pair_tile: int, role: Dictionary, full: Arra
 					yaku.append({"name": "yakuhai", "han": 1})
 				if t == round_wind:
 					yaku.append({"name": "yakuhai", "han": 1})
-	# sanshoku doukou (same number triplet in all suits)
-	for n in 9:
-		if full[n] >= 3 and full[9 + n] >= 3 and full[18 + n] >= 3:
+	# sanshoku doukou (same-number triplet in all three suits, from actual sets)
+	var trip_suits_by_rank := {}
+	for s in sets:
+		if s[0] == "trip" and s[1] < 27:
+			var r: int = s[1] % 9
+			if not trip_suits_by_rank.has(r):
+				trip_suits_by_rank[r] = {}
+			trip_suits_by_rank[r][int(s[1] / 9)] = true
+	for r in trip_suits_by_rank:
+		if trip_suits_by_rank[r].size() == 3:
 			yaku.append({"name": "sanshoku_doukou", "han": 2})
+			break
+	if kans == 3:
+		yaku.append({"name": "sankantsu", "han": 2})
 	# toitoi / sanankou / honroutou
 	if trips == 4:
 		yaku.append({"name": "toitoi", "han": 2})
@@ -507,6 +549,14 @@ static func _eval_role(sets: Array, pair_tile: int, role: Dictionary, full: Arra
 			wind_trips += 1
 	if wind_trips == 3 and WINDS.has(pair_tile):
 		yaku.append({"name": "shousuushi", "han": 2})
+	# shousangen: two dragon triplets + the third dragon as the pair
+	# (the two yakuhai are already counted in the triplet loop above)
+	var dragon_trips := 0
+	for s in sets:
+		if s[0] == "trip" and DRAGONS.has(s[1]):
+			dragon_trips += 1
+	if dragon_trips == 2 and DRAGONS.has(pair_tile):
+		yaku.append({"name": "shousangen", "han": 2})
 	# honitsu / chinitsu
 	var suits_present := {}
 	var honors_present := false
@@ -526,8 +576,9 @@ static func _eval_role(sets: Array, pair_tile: int, role: Dictionary, full: Arra
 	if _han_sum(yaku) == 0:
 		return {"valid": false}
 
-	# fu finalization
-	if is_pinfu_shape:
+	# fu finalization (the 20/30 pinfu treatment is closed-hand only;
+	# an open all-sequence shape rounds up normally)
+	if is_pinfu_shape and is_closed:
 		fu = 20 if is_tsumo else 30
 	else:
 		if fu == 20 and not is_closed:
