@@ -54,6 +54,12 @@ func _run() -> void:
 		if r.size.x < 150 or r.position.x < 0 or r.end.x > win_size.x:
 			print("FAIL seat ", seat, " river rect: ", r)
 			ok = false
+		if r.intersects(hand_rect) or r.intersects(action_rect):
+			print("FAIL seat ", seat, " river overlaps hand/actions: ", r)
+			ok = false
+	if river_rect.intersects(hand_rect):
+		print("FAIL human river overlaps hand: ", river_rect)
+		ok = false
 	if ok:
 		print("ALL TESTS PASSED (layout stays on screen, hand bottom=", hand_rect.end.y, ")")
 	quit()

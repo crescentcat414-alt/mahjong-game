@@ -23,6 +23,8 @@ var dealer := 0
 var honba := 0
 var sticks := 0  # riichi sticks on the table (1000 each)
 var human_seat := -1
+## CPU difficulty for all CPU seats: 0 weak, 1 normal (default), 2 strong.
+var cpu_difficulty := 1
 
 var players: Array = []
 var live: Array = []       # drawable wall (pop_back draws)
@@ -331,6 +333,13 @@ func _cpu_choose_discard(seat: int) -> Dictionary:
 	# returns {tile: String, riichi: bool}
 	var p: Dictionary = players[seat]
 	var hand: Array = p["hand"]
+	# note: never called for a riichi CPU (_cpu_discard forces tsumo-giri)
+	# weak CPU: sometimes tsumo-giri, sometimes a random discard
+	if cpu_difficulty == 0 and seat != human_seat:
+		if drawn_tile != "" and hand.has(drawn_tile) and randf() < 0.25:
+			return {"tile": drawn_tile, "riichi": false}
+		if randf() < 0.30:
+			return {"tile": hand[randi() % hand.size()], "riichi": false}
 	var c := Rules.counts_from_tiles(hand)
 	var meld_n: int = p["melds"].size()
 	# pass 1: shanten only (cheap); pass 2: ukeire only among the best
@@ -363,7 +372,63 @@ func _cpu_choose_discard(seat: int) -> Dictionary:
 			best_score = score
 			best_tile = t
 			best_riichi = min_sh == 0 and meld_n == 0 and p["score"] >= 1000 and not p["riichi"]
+	# strong CPU: when not tenpai and an opponent is in riichi, fold —
+	# among the best-shanten discards pick the safest (ukeire breaks ties)
+	if cpu_difficulty == 2 and seat != human_seat and min_sh >= 1 and _any_riichi_opp(seat):
+		var safest := ""
+		var safest_key := 1e9
+		for t in cand_shanten:
+			if cand_shanten[t] != min_sh:
+				continue
+			var cc2: Array = c.duplicate()
+			cc2[Rules.tile_index(t)] -= 1
+			var uk2: int = Rules.effective_tiles_for(cc2, meld_n).size()
+			var key: float = _danger(seat, Rules.tile_index(t)) * 1000.0 - uk2
+			if key < safest_key:
+				safest_key = key
+				safest = t
+		if safest != "":
+			return {"tile": safest, "riichi": false}
 	return {"tile": best_tile, "riichi": best_riichi}
+
+
+func _any_riichi_opp(seat: int) -> bool:
+	for s in 4:
+		if s != seat and players[s]["riichi"]:
+			return true
+	return false
+
+
+## Danger of discarding tile_idx for `seat`, against riichi opponents:
+## 0 = genbutsu for every riichi opponent, 1 = suji-covered, 2 = the rest.
+func _danger(seat: int, tile_idx: int) -> int:
+	var worst := 0
+	for s in 4:
+		if s == seat or not players[s]["riichi"]:
+			continue
+		var idxs: Array = []
+		for t in players[s]["discards"]:
+			idxs.append(Rules.tile_index(t))
+		if idxs.has(tile_idx):
+			continue  # genbutsu for this opponent
+		if _suji_safe(tile_idx, idxs):
+			worst = maxi(worst, 1)
+		else:
+			return 2
+	return worst
+
+
+func _suji_safe(tile_idx: int, opp_disc_idx: Array) -> bool:
+	if tile_idx >= 27:
+		return false  # honors have no suji
+	var n := tile_idx % 9  # 0..8 within the suit
+	# ryanmen partners of X are X-3 and X+3: X is suji-safe when every
+	# partner that exists has already been discarded by that opponent
+	if n >= 3 and not opp_disc_idx.has(tile_idx - 3):
+		return false
+	if n <= 5 and not opp_disc_idx.has(tile_idx + 3):
+		return false
+	return true
 
 
 # ---------------- flow: advance / steps ----------------
@@ -606,7 +671,10 @@ func _claims_pon_stage() -> void:
 	var before := Rules.shanten_for(c2, meld_n)
 	var cc: Array = c2.duplicate()
 	cc[tile_idx] -= 3 if is_kan else 2
-	if Rules.shanten_for(cc, meld_n + 1) <= before:
+	var call_it: bool = Rules.shanten_for(cc, meld_n + 1) <= before
+	if cpu_difficulty == 0 and randf() < 0.5:
+		call_it = false  # weak CPU often lets calls go
+	if call_it:
 		if is_kan:
 			_do_daiminkan(claimant, claim_from, claim_tile)
 		else:
@@ -633,7 +701,7 @@ func _claims_chi_stage() -> void:
 			"chi_options": opts,
 		}
 		return
-	# CPU policy: chi if it lowers shanten
+	# CPU policy: chi if it lowers shanten (weak CPU often lets it go)
 	var meld_n: int = players[nxt]["melds"].size()
 	var before := Rules.shanten_for(c, meld_n)
 	var start: int = opts[0]
@@ -641,7 +709,10 @@ func _claims_chi_stage() -> void:
 	for d in [0, 1, 2]:
 		if start + d != tile_idx:
 			cc[start + d] -= 1
-	if Rules.shanten_for(cc, meld_n + 1) < before:
+	var call_it: bool = Rules.shanten_for(cc, meld_n + 1) < before
+	if cpu_difficulty == 0 and randf() < 0.5:
+		call_it = false
+	if call_it:
 		_do_chi(nxt, claim_from, claim_tile, start)
 	else:
 		claim_stage = "next"

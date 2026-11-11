@@ -86,95 +86,96 @@ func _ready() -> void:
 	timer.start()
 
 
+## Place a control at an absolute position on the table (Phase 6 layout:
+## no layout containers between regions, so nothing can ever drift).
+func _place(ctrl: Control, x: float, y: float, w: float, h: float) -> Control:
+	ctrl.position = Vector2(x, y)
+	ctrl.size = Vector2(w, h)
+	add_child(ctrl)
+	return ctrl
+
+
 func _build_ui() -> void:
-	var margin := MarginContainer.new()
-	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 12)
-	margin.add_theme_constant_override("margin_right", 12)
-	margin.add_theme_constant_override("margin_top", 8)
-	margin.add_theme_constant_override("margin_bottom", 8)
-	add_child(margin)
-
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 4)
-	margin.add_child(vbox)
-
-	# top row: title/info + new match
-	var top := HBoxContainer.new()
-	vbox.add_child(top)
-	info_label = Label.new()
-	info_label.add_theme_font_size_override("font_size", 18)
-	info_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	top.add_child(info_label)
-	var restart := Button.new()
-	restart.text = "対局を最初から"
-	restart.pressed.connect(_new_match)
-	top.add_child(restart)
+	# Majsoul-style layout: a center panel with the round info, the four
+	# rivers around it facing the center, the human hand at the bottom.
+	# --- top-right controls: options + restart ---
+	var topbar := HBoxContainer.new()
+	topbar.alignment = BoxContainer.ALIGNMENT_END
+	topbar.add_theme_constant_override("separation", 10)
+	_place(topbar, 690, 6, 582, 34)
+	var diff := OptionButton.new()
+	diff.add_item("CPU：弱い", 0)
+	diff.add_item("CPU：普通", 1)
+	diff.add_item("CPU：強い", 2)
+	diff.selected = 1
+	diff.item_selected.connect(func(idx: int): game.cpu_difficulty = idx)
+	topbar.add_child(diff)
 	var auto_cb := CheckBox.new()
 	auto_cb.text = "リーチ後オートツモ切り"
 	auto_cb.button_pressed = true
 	auto_cb.toggled.connect(func(on: bool): auto_tsumogiri = on)
-	top.add_child(auto_cb)
+	topbar.add_child(auto_cb)
 	var nc_cb := CheckBox.new()
 	nc_cb.text = "鳴きなし"
 	nc_cb.toggled.connect(func(on: bool): no_calls = on)
-	top.add_child(nc_cb)
+	topbar.add_child(nc_cb)
+	var restart := Button.new()
+	restart.text = "対局を最初から"
+	restart.pressed.connect(_new_match)
+	topbar.add_child(restart)
 
-	# table area (expands); every region inside has a FIXED height, so no
-	# amount of discards can push the hand / buttons off screen
-	var table := VBoxContainer.new()
-	table.add_theme_constant_override("separation", 4)
-	table.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(table)
-
-	# top CPU (seat 2)
-	table.add_child(_build_cpu_area(2))
-	# middle row: left CPU (seat 3), center, right CPU (seat 1)
-	var mid := HBoxContainer.new()
-	mid.add_theme_constant_override("separation", 8)
-	mid.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	table.add_child(mid)
-	mid.add_child(_build_cpu_area(3))
-	var center := VBoxContainer.new()
-	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	mid.add_child(center)
+	# --- center panel: round info + wall + dora indicators ---
+	var panel := PanelContainer.new()
+	_place(panel, 470, 226, 340, 250)
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 6)
+	panel.add_child(pv)
+	info_label = Label.new()
+	info_label.add_theme_font_size_override("font_size", 19)
+	info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pv.add_child(info_label)
 	center_label = Label.new()
 	center_label.add_theme_font_size_override("font_size", 17)
 	center_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	center.add_child(center_label)
+	pv.add_child(center_label)
 	var dora_title := Label.new()
 	dora_title.text = "ドラ表示"
 	dora_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	center.add_child(dora_title)
+	pv.add_child(dora_title)
 	dora_box = HBoxContainer.new()
 	dora_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	center.add_child(dora_box)
-	mid.add_child(_build_cpu_area(1))
+	pv.add_child(dora_box)
 
-	# human area: river (fixed height, clipped), then melds+hand
+	# --- CPU areas: top (seat 2), left (seat 3), right (seat 1) ---
+	_build_cpu_area(2, Rect2(460, 42, 360, 24), Rect2(460, 6, 360, 34),
+		Rect2(460, 68, 360, 46), Rect2(474, 122, 332, 76), 12)
+	_build_cpu_area(3, Rect2(10, 238, 320, 24), Rect2(10, 266, 320, 34),
+		Rect2(10, 304, 320, 46), Rect2(10, 362, 176, 168), 6)
+	_build_cpu_area(1, Rect2(950, 238, 320, 24), Rect2(950, 266, 320, 34),
+		Rect2(950, 304, 320, 46), Rect2(1094, 362, 176, 168), 6)
+
+	# --- human area: river, actions, hand, melds, status ---
 	human_river = GridContainer.new()
 	human_river.columns = 12
-	human_river.add_theme_constant_override("h_separation", 3)
-	human_river.add_theme_constant_override("v_separation", 3)
-	vbox.add_child(_fixed_frame(human_river, 105.0))
-	var hand_row := HBoxContainer.new()
-	hand_row.add_theme_constant_override("separation", 10)
-	vbox.add_child(hand_row)
-	hand_box = HBoxContainer.new()
-	hand_box.add_theme_constant_override("separation", 3)
-	hand_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hand_row.add_child(hand_box)
-	human_meld_box = HBoxContainer.new()
-	human_meld_box.add_theme_constant_override("separation", 6)
-	hand_row.add_child(human_meld_box)
-
-	# status + actions (fixed flow: always on screen)
-	status_label = Label.new()
-	status_label.add_theme_font_size_override("font_size", 16)
-	vbox.add_child(status_label)
+	human_river.add_theme_constant_override("h_separation", 4)
+	human_river.add_theme_constant_override("v_separation", 4)
+	_place(human_river, 438, 498, 404, 94)
 	action_box = HBoxContainer.new()
+	action_box.alignment = BoxContainer.ALIGNMENT_END
 	action_box.add_theme_constant_override("separation", 8)
-	vbox.add_child(action_box)
+	_place(action_box, 640, 600, 632, 38)
+	hand_box = HBoxContainer.new()
+	hand_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	hand_box.add_theme_constant_override("separation", 3)
+	_place(hand_box, 150, 644, 880, 84)
+	human_meld_box = HBoxContainer.new()
+	human_meld_box.alignment = BoxContainer.ALIGNMENT_END
+	human_meld_box.add_theme_constant_override("separation", 6)
+	_place(human_meld_box, 1052, 650, 220, 72)
+	status_label = Label.new()
+	status_label.add_theme_font_size_override("font_size", 15)
+	status_label.clip_text = true
+	_place(status_label, 12, 730, 700, 24)
 
 	# result panel is an OVERLAY (centered), never part of the flow,
 	# so showing it cannot shift the layout either
@@ -211,40 +212,27 @@ func _build_ui() -> void:
 	add_child(riichi_guide_panel)
 
 
-## Wrap a control in a fixed-height frame that clips any overflow.
-## This is what guarantees the layout can never drift: containers inside
-## may ask for more room as tiles pile up, but the frame never grows.
-## Width: pass an explicit width for side-by-side use -- content-derived
-## minimums arrive too late and the row overflows (found by playtest).
-func _fixed_frame(inner: Control, height: float, width: float = 0.0) -> Control:
-	var frame := Control.new()
-	var min_x := width if width > 0.0 else inner.get_combined_minimum_size().x
-	frame.custom_minimum_size = Vector2(min_x, height)
-	frame.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	frame.clip_contents = true
-	inner.set_anchors_preset(Control.PRESET_FULL_RECT)
-	frame.add_child(inner)
-	return frame
-
-
-func _build_cpu_area(seat: int) -> Control:
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 3)
+## Build one CPU seat's absolutely-positioned area: info label, tile
+## backs, melds and river, each in its own fixed rect (Phase 6 layout).
+func _build_cpu_area(seat: int, info_r: Rect2, backs_r: Rect2,
+		melds_r: Rect2, river_r: Rect2, cols: int) -> void:
 	var info := Label.new()
 	info.add_theme_font_size_override("font_size", 15)
-	box.add_child(info)
+	info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_place(info, info_r.position.x, info_r.position.y, info_r.size.x, info_r.size.y)
 	var backs := HBoxContainer.new()
+	backs.alignment = BoxContainer.ALIGNMENT_CENTER
 	backs.add_theme_constant_override("separation", 2)
-	box.add_child(backs)
+	_place(backs, backs_r.position.x, backs_r.position.y, backs_r.size.x, backs_r.size.y)
 	var melds := HBoxContainer.new()
+	melds.alignment = BoxContainer.ALIGNMENT_CENTER
 	melds.add_theme_constant_override("separation", 6)
-	box.add_child(melds)
-	# river LAST: inside the fixed frame it is the part that may clip
+	_place(melds, melds_r.position.x, melds_r.position.y, melds_r.size.x, melds_r.size.y)
 	var river := GridContainer.new()
-	river.columns = 8
-	river.add_theme_constant_override("h_separation", 3)
-	river.add_theme_constant_override("v_separation", 3)
-	box.add_child(river)
+	river.columns = cols
+	river.add_theme_constant_override("h_separation", 4)
+	river.add_theme_constant_override("v_separation", 4)
+	_place(river, river_r.position.x, river_r.position.y, river_r.size.x, river_r.size.y)
 	while seat_info.size() <= seat:
 		seat_info.append(null)
 		seat_rivers.append(null)
@@ -254,7 +242,6 @@ func _build_cpu_area(seat: int) -> Control:
 	seat_rivers[seat] = river
 	seat_melds[seat] = melds
 	seat_backs[seat] = backs
-	return _fixed_frame(box, 204.0, 300.0)
 
 
 func _new_match() -> void:
@@ -361,12 +348,13 @@ func _refresh() -> void:
 			seat_info[seat].text = "CPU%d（%s家） %d点%s%s" % [seat, wind, p["score"], riichi_mark, turn_mark]
 			_clear(seat_backs[seat])
 			for i in p["hand"].size():
-				seat_backs[seat].add_child(_tile_rect("back", Vector2(18, 27)))
-			_refresh_river(seat_rivers[seat], p["discards"], Vector2(22, 33))
+				seat_backs[seat].add_child(_tile_rect("back", Vector2(20, 30)))
+			_refresh_river(seat_rivers[seat], p["discards"],
+				Vector2(24, 36) if seat == 2 else Vector2(26, 39))
 			_refresh_melds(seat_melds[seat], p["melds"])
 	# human
 	var hp: Dictionary = game.players[0]
-	_refresh_river(human_river, hp["discards"], Vector2(34, 51))
+	_refresh_river(human_river, hp["discards"], Vector2(30, 45))
 	_refresh_melds(human_meld_box, hp["melds"])
 	_refresh_hand(hp)
 	_refresh_status(hp)
@@ -414,7 +402,7 @@ func _refresh_hand(hp: Dictionary) -> void:
 
 
 func _add_hand_tile(tile: String, is_drawn: bool) -> void:
-	var r := _tile_rect(tile, Vector2(52, 78))
+	var r := _tile_rect(tile, Vector2(50, 75))
 	if is_drawn:
 		r.modulate = Color(1, 1, 0.85)
 	r.mouse_filter = Control.MOUSE_FILTER_STOP
