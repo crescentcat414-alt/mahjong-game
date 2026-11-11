@@ -100,4 +100,6 @@ func _fresh_scene_ready() -> Control:
 	var scene = _fresh_scene()
 	await process_frame
 	await process_frame
+	scene._pick_character("wing")
+	await process_frame
 	return scene

@@ -36,6 +36,10 @@ const YAKU_JA := {
 }
 const Game := preload("res://game.gd")
 const Rules := preload("res://rules.gd")
+const Chars := preload("res://characters.gd")
+const ROSTER_PATH := "user://characters.json"
+const PALETTE := ["#e86a92", "#e8a33d", "#5b8dd9", "#5aa469",
+	"#8a6fd6", "#4fb3b0", "#d95b5b", "#888888"]
 const TILE_JA := {"ton": "東", "nan": "南", "shaa": "西", "pei": "北", "haku": "白", "hatsu": "發", "chun": "中"}
 const SUIT_JA := {"man": "萬", "pin": "筒", "sou": "索"}
 const ABORT_JA := {
@@ -62,6 +66,18 @@ var riichi_guide_panel: PanelContainer
 var riichi_guide_label: Label
 var timer: Timer
 
+# character system (Phase 5-revised): roster, per-seat picks, select UI
+var roster: Array = []
+var match_chars: Array = []
+var seat_chips: Array = []
+var human_chip: Panel
+var select_panel: PanelContainer
+var select_cards: HBoxContainer
+var editor_panel: PanelContainer
+var editor_rows: VBoxContainer
+var editor_data: Array = []
+var select_open := false
+
 # per-seat UI refs, indexed by seat
 var seat_info: Array = []
 var seat_rivers: Array = []
@@ -77,7 +93,9 @@ func _ready() -> void:
 		textures[key] = load(TILE_DIR + TILE_FILES[key])
 	game = Game.new()
 	game.human_seat = 0
+	roster = Chars.load_roster(ROSTER_PATH)
 	_build_ui()
+	_build_select_ui()
 	_new_match()
 	timer = Timer.new()
 	timer.wait_time = 0.55
@@ -177,6 +195,10 @@ func _build_ui() -> void:
 	status_label.clip_text = true
 	_place(status_label, 12, 730, 700, 24)
 
+	# character chips (coloured initial badges) beside each seat's info
+	seat_chips = [null, _make_chip(1236, 200), _make_chip(424, 38), _make_chip(10, 200)]
+	human_chip = _make_chip(12, 692)
+
 	# result panel is an OVERLAY (centered), never part of the flow,
 	# so showing it cannot shift the layout either
 	result_panel = PanelContainer.new()
@@ -245,6 +267,33 @@ func _build_cpu_area(seat: int, info_r: Rect2, backs_r: Rect2,
 
 
 func _new_match() -> void:
+	# (re)opens the character select; the match starts on a pick
+	select_open = true
+	editor_panel.visible = false
+	_rebuild_select_cards()
+	select_panel.visible = true
+
+
+func _pick_character(char_id: String) -> void:
+	var me: Dictionary = {}
+	for ch in roster:
+		if ch["id"] == char_id:
+			me = ch
+			break
+	if me.is_empty() and not roster.is_empty():
+		me = roster[0]
+	match_chars = [me]
+	for p in Chars.cpu_picks(roster, str(me.get("id", "")), randi()):
+		match_chars.append(p)
+	while match_chars.size() < 4:
+		match_chars.append({"id": "cpu", "name": "CPU", "color": "#888888", "icon": ""})
+	select_open = false
+	select_panel.visible = false
+	_apply_chips()
+	_begin_match()
+
+
+func _begin_match() -> void:
 	game.scores = [25000, 25000, 25000, 25000]
 	game.dealer = 0
 	game.round_wind = 27
@@ -252,6 +301,214 @@ func _new_match() -> void:
 	game.sticks = 0
 	label_index = 0
 	_start_round()
+
+
+func _make_chip(x: float, y: float) -> Panel:
+	var chip := Panel.new()
+	var sb := StyleBoxFlat.new()
+	sb.set_corner_radius_all(8)
+	sb.bg_color = Color("#888888")
+	chip.add_theme_stylebox_override("panel", sb)
+	var lab := Label.new()
+	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lab.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lab.add_theme_font_size_override("font_size", 17)
+	lab.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chip.add_child(lab)
+	_place(chip, x, y, 34, 34)
+	return chip
+
+
+func _set_chip(chip: Panel, ch: Dictionary) -> void:
+	if chip == null:
+		return
+	var sb := chip.get_theme_stylebox("panel").duplicate() as StyleBoxFlat
+	sb.bg_color = Color(str(ch.get("color", "#888888")))
+	chip.add_theme_stylebox_override("panel", sb)
+	(chip.get_child(0) as Label).text = str(ch.get("name", "?")).left(1)
+
+
+func _apply_chips() -> void:
+	if match_chars.size() < 4:
+		return
+	_set_chip(human_chip, match_chars[0])
+	for seat in [1, 2, 3]:
+		_set_chip(seat_chips[seat], match_chars[seat])
+
+
+func _build_select_ui() -> void:
+	select_panel = PanelContainer.new()
+	select_panel.set_anchors_preset(Control.PRESET_CENTER)
+	select_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	select_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	select_panel.custom_minimum_size = Vector2(680, 0)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 10)
+	select_panel.add_child(v)
+	var title := Label.new()
+	title.text = "キャラクターを選んでね"
+	title.add_theme_font_size_override("font_size", 20)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(title)
+	select_cards = HBoxContainer.new()
+	select_cards.alignment = BoxContainer.ALIGNMENT_CENTER
+	select_cards.add_theme_constant_override("separation", 10)
+	v.add_child(select_cards)
+	var edit_btn := Button.new()
+	edit_btn.text = "キャラクターを編集する"
+	edit_btn.pressed.connect(_open_editor)
+	v.add_child(edit_btn)
+	select_panel.visible = false
+	add_child(select_panel)
+
+	editor_panel = PanelContainer.new()
+	editor_panel.set_anchors_preset(Control.PRESET_CENTER)
+	editor_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	editor_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	editor_panel.custom_minimum_size = Vector2(560, 0)
+	var ev := VBoxContainer.new()
+	ev.add_theme_constant_override("separation", 8)
+	editor_panel.add_child(ev)
+	var et := Label.new()
+	et.text = "キャラクター編集（名前とテーマカラー）"
+	et.add_theme_font_size_override("font_size", 18)
+	ev.add_child(et)
+	editor_rows = VBoxContainer.new()
+	editor_rows.add_theme_constant_override("separation", 6)
+	ev.add_child(editor_rows)
+	var btns := HBoxContainer.new()
+	btns.add_theme_constant_override("separation", 8)
+	ev.add_child(btns)
+	var add_btn := Button.new()
+	add_btn.text = "＋追加"
+	add_btn.pressed.connect(_editor_add)
+	btns.add_child(add_btn)
+	var save_btn := Button.new()
+	save_btn.text = "保存して戻る"
+	save_btn.pressed.connect(_editor_save)
+	btns.add_child(save_btn)
+	var cancel_btn := Button.new()
+	cancel_btn.text = "キャンセル"
+	cancel_btn.pressed.connect(_editor_cancel)
+	btns.add_child(cancel_btn)
+	editor_panel.visible = false
+	add_child(editor_panel)
+
+
+func _rebuild_select_cards() -> void:
+	_clear(select_cards)
+	for ch in roster:
+		select_cards.add_child(_make_card(ch))
+
+
+func _make_card(ch: Dictionary) -> Control:
+	var card := PanelContainer.new()
+	card.custom_minimum_size = Vector2(104, 118)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.16, 0.16, 0.2)
+	sb.set_corner_radius_all(10)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(str(ch["color"]))
+	card.add_theme_stylebox_override("panel", sb)
+	var v := VBoxContainer.new()
+	v.alignment = BoxContainer.ALIGNMENT_CENTER
+	card.add_child(v)
+	var chip := Panel.new()
+	chip.custom_minimum_size = Vector2(52, 52)
+	var csb := StyleBoxFlat.new()
+	csb.set_corner_radius_all(26)
+	csb.bg_color = Color(str(ch["color"]))
+	chip.add_theme_stylebox_override("panel", csb)
+	var ini := Label.new()
+	ini.text = str(ch["name"]).left(1)
+	ini.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ini.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	ini.add_theme_font_size_override("font_size", 24)
+	ini.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chip.add_child(ini)
+	v.add_child(chip)
+	var nm := Label.new()
+	nm.text = str(ch["name"])
+	nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	v.add_child(nm)
+	card.mouse_filter = Control.MOUSE_FILTER_STOP
+	card.gui_input.connect(func(event: InputEvent):
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			_pick_character(str(ch["id"])))
+	return card
+
+
+func _open_editor() -> void:
+	editor_data = roster.duplicate(true)
+	_rebuild_editor_rows()
+	select_panel.visible = false
+	editor_panel.visible = true
+
+
+func _rebuild_editor_rows() -> void:
+	_clear(editor_rows)
+	for i in editor_data.size():
+		editor_rows.add_child(_make_editor_row(i))
+
+
+func _make_editor_row(i: int) -> Control:
+	var ch: Dictionary = editor_data[i]
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var name_edit := LineEdit.new()
+	name_edit.text = str(ch["name"])
+	name_edit.custom_minimum_size = Vector2(200, 0)
+	name_edit.max_length = 24
+	row.add_child(name_edit)
+	var color_opt := OptionButton.new()
+	for c in PALETTE:
+		color_opt.add_item(c)
+	var cur: int = PALETTE.find(str(ch["color"]))
+	color_opt.selected = cur if cur >= 0 else PALETTE.size() - 1
+	row.add_child(color_opt)
+	var del := Button.new()
+	del.text = "削除"
+	del.pressed.connect(func():
+		_harvest_editor()
+		editor_data.remove_at(i)
+		_rebuild_editor_rows())
+	row.add_child(del)
+	row.set_meta("name_edit", name_edit)
+	row.set_meta("color_opt", color_opt)
+	return row
+
+
+func _harvest_editor() -> void:
+	for i in editor_rows.get_child_count():
+		if i >= editor_data.size():
+			break
+		var row: Control = editor_rows.get_child(i)
+		editor_data[i]["name"] = (row.get_meta("name_edit") as LineEdit).text
+		editor_data[i]["color"] = PALETTE[(row.get_meta("color_opt") as OptionButton).selected]
+
+
+func _editor_add() -> void:
+	_harvest_editor()
+	editor_data.append({"id": "char_" + str(Time.get_ticks_msec() % 100000000),
+		"name": "新規キャラ", "color": PALETTE[editor_data.size() % PALETTE.size()],
+		"icon": ""})
+	_rebuild_editor_rows()
+
+
+func _editor_save() -> void:
+	_harvest_editor()
+	var cleaned: Array = Chars.sanitize_roster(editor_data)
+	if not cleaned.is_empty():
+		roster = cleaned
+		Chars.save_roster(ROSTER_PATH, roster)
+	editor_panel.visible = false
+	_new_match()
+
+
+func _editor_cancel() -> void:
+	editor_panel.visible = false
+	_new_match()
 
 
 func _start_round() -> void:
@@ -264,6 +521,8 @@ func _start_round() -> void:
 
 
 func _on_tick() -> void:
+	if select_open:
+		return
 	if not game.result.is_empty():
 		return
 	if not game.awaiting.is_empty():
@@ -345,7 +604,10 @@ func _refresh() -> void:
 		if seat == 0:
 			pass
 		else:
-			seat_info[seat].text = "CPU%d（%s家） %d点%s%s" % [seat, wind, p["score"], riichi_mark, turn_mark]
+			var disp: String = "CPU%d" % seat
+			if match_chars.size() == 4:
+				disp = str(match_chars[seat]["name"])
+			seat_info[seat].text = "%s（%s家） %d点%s%s" % [disp, wind, p["score"], riichi_mark, turn_mark]
 			_clear(seat_backs[seat])
 			for i in p["hand"].size():
 				seat_backs[seat].add_child(_tile_rect("back", Vector2(20, 30)))
@@ -427,7 +689,10 @@ func _refresh_status(hp: Dictionary) -> void:
 	else:
 		sh = Rules.shanten_for(counts, meld_n)
 	var wind: String = WIND_NAMES[(0 - game.dealer + 4) % 4]
-	var txt := "あなた（%s家） %d点" % [wind, hp["score"]]
+	var my_name := "あなた"
+	if match_chars.size() == 4:
+		my_name = str(match_chars[0]["name"])
+	var txt := "%s（%s家） %d点" % [my_name, wind, hp["score"]]
 	if hp["riichi"]:
 		txt += "　リーチ中"
 	elif sh == 0:

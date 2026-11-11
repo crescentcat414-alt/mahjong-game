@@ -17,7 +17,20 @@ func _run() -> void:
 	root.add_child(scene)
 	await process_frame
 	await process_frame
+	scene._pick_character("wing")
+	await process_frame
 	var g = scene.game
+	# character system: the pick fills all four seats, seat 0 is Wing,
+	# and the seat info shows character names instead of "CPU1" etc.
+	if scene.match_chars.size() != 4 or scene.match_chars[0]["name"] != "ウィング":
+		print("FAIL character pick did not fill the seats: ", scene.match_chars)
+		quit()
+		return
+	scene._refresh()
+	if not scene.seat_info[1].text.begins_with(str(scene.match_chars[1]["name"])):
+		print("FAIL seat info does not show the character name: ", scene.seat_info[1].text)
+		quit()
+		return
 	var guard := 0
 	while g.result.is_empty() and guard < 6000:
 		guard += 1

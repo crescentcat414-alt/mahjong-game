@@ -18,6 +18,8 @@ func _run() -> void:
 	root.add_child(scene)
 	await process_frame
 	await process_frame
+	scene._pick_character("wing")
+	await process_frame
 	var g = scene.game
 	# pile up maximum-length rivers on every seat
 	var pile: Array = []
