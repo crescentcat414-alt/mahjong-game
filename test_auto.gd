@@ -73,6 +73,22 @@ func _run() -> void:
 	check(g.awaiting.is_empty() or not g.awaiting.get("can_pon", false),
 		"D right-click passed the pon offer")
 
+	# --- E: riichi-declare guide lists waits for candidate discards ---
+	g.players[0]["hand"] = ["man2", "man3", "man4", "man6", "man7", "man8",
+		"pin3", "pin4", "sou5", "sou5", "sou5", "sou7", "sou8", "sou9"]
+	g.players[0]["melds"] = []
+	g.players[0]["riichi"] = false
+	g.drawn_tile = "sou9"
+	g.awaiting = {"kind": "post_draw", "can_tsumo": false, "ankan": [], "kakan": [], "kyushu": false}
+	scene.riichi_mode = true
+	scene._refresh()
+	check(scene.riichi_guide_panel.visible
+		and scene.riichi_guide_label.text.contains("待ち")
+		and scene.riichi_guide_label.text.contains("2筒"),
+		"E riichi guide shows waits (got: " + scene.riichi_guide_label.text.replace("\n", " / ") + ")")
+	scene.riichi_mode = false
+	g.awaiting = {}
+
 	if failures == 0:
 		print("ALL TESTS PASSED (auto behaviours)")
 	else:

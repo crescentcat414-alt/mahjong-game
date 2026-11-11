@@ -58,6 +58,8 @@ var dora_box: HBoxContainer
 var action_box: HBoxContainer
 var result_panel: PanelContainer
 var result_label: Label
+var riichi_guide_panel: PanelContainer
+var riichi_guide_label: Label
 var timer: Timer
 
 # per-seat UI refs, indexed by seat
@@ -187,6 +189,26 @@ func _build_ui() -> void:
 	result_panel.add_child(result_label)
 	result_panel.visible = false
 	add_child(result_panel)
+
+	# riichi-declare guide: an overlay band above the hand, shown only
+	# while the player picks the declaration discard. Like Majsoul, it
+	# lists each candidate discard with its waits and remaining count.
+	riichi_guide_panel = PanelContainer.new()
+	riichi_guide_panel.anchor_left = 0.5
+	riichi_guide_panel.anchor_right = 0.5
+	riichi_guide_panel.anchor_top = 1.0
+	riichi_guide_panel.anchor_bottom = 1.0
+	riichi_guide_panel.offset_left = -370.0
+	riichi_guide_panel.offset_right = 370.0
+	riichi_guide_panel.offset_top = -268.0
+	riichi_guide_panel.offset_bottom = -140.0
+	riichi_guide_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	riichi_guide_label = Label.new()
+	riichi_guide_label.add_theme_font_size_override("font_size", 15)
+	riichi_guide_label.clip_text = true
+	riichi_guide_panel.add_child(riichi_guide_label)
+	riichi_guide_panel.visible = false
+	add_child(riichi_guide_panel)
 
 
 ## Wrap a control in a fixed-height frame that clips any overflow.
@@ -348,6 +370,7 @@ func _refresh() -> void:
 	_refresh_melds(human_meld_box, hp["melds"])
 	_refresh_hand(hp)
 	_refresh_status(hp)
+	_update_riichi_guide(hp)
 	_refresh_actions()
 	if not game.result.is_empty():
 		_show_result()
@@ -430,6 +453,52 @@ func _refresh_status(hp: Dictionary) -> void:
 	elif sh > 0 and sh < 90:
 		txt += "　%d向聴" % sh
 	status_label.text = txt
+
+
+## Show/hide the riichi-declare guide overlay and fill it with the
+## candidate discards, their waits and the remaining tile counts.
+func _update_riichi_guide(hp: Dictionary) -> void:
+	var show: bool = riichi_mode and not hp["riichi"] and not game.awaiting.is_empty() \
+		and game.awaiting["kind"] == "post_draw"
+	riichi_guide_panel.visible = show
+	if not show:
+		return
+	var counts := Rules.counts_from_tiles(hp["hand"])
+	riichi_guide_label.text = "リーチ宣言：切る牌を選んでね\n" \
+		+ _riichi_discard_guide(counts, hp["melds"].size())
+
+
+func _riichi_discard_guide(counts: Array, meld_n: int) -> String:
+	# visible tiles: every discard and meld on the table + dora indicators
+	var visible: Array = []
+	visible.resize(34)
+	for i in 34:
+		visible[i] = 0
+	for s in 4:
+		for t in game.players[s]["discards"]:
+			visible[Rules.tile_index(t)] += 1
+		for m in game.players[s]["melds"]:
+			for t in m["tiles"]:
+				visible[Rules.tile_index(t)] += 1
+	for idx in game.dora_indicators():
+		visible[idx] += 1
+	var lines: Array = []
+	for i in 34:
+		if counts[i] == 0:
+			continue
+		var c: Array = counts.duplicate()
+		c[i] -= 1
+		if Rules.shanten_for(c, meld_n) != 0:
+			continue
+		var waits: Array = Rules.winning_tiles_for(c, meld_n)
+		var names: Array = []
+		var left := 0
+		for w in waits:
+			names.append(_tile_ja(game._tile_name(w)))
+			left += maxi(0, 4 - c[w] - visible[w])
+		lines.append("%s切り → 待ち %s（あと%d枚）" % [
+			_tile_ja(game._tile_name(i)), "・".join(names), left])
+	return "\n".join(lines)
 
 
 func counts_total(counts: Array) -> int:
